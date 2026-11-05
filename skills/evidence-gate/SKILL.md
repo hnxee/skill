@@ -13,7 +13,7 @@ description: >-
   Not for pure conversation, brainstorming or questions that change nothing.
 license: MIT
 metadata:
-  version: 1.0.0
+  version: 1.1.0
   category: reliability
   requires: python>=3.8 (standard library only), optional
   portable: true
@@ -146,12 +146,14 @@ $L verify C1 --expect-exit 1 --label before -- python3 -c "from dates import par
 
 # ... make the change ...
 
-$L verify C1 --watch src/dates/parse.py -- python3 -m pytest tests/test_parse.py -q -k impossible
-$L verify C2 --watch src -- python3 -m pytest -q
+$L verify C1 -- python3 -m pytest tests/test_parse.py -q -k impossible
+$L verify C2 -- python3 -m pytest -q
 $L verify C3 --shell --expect-exit 1 -- "git diff --name-only HEAD | grep -vE '^(src/dates/|tests/)'"
 $L attest C4 --note "Read README section 'Dates'; wording updated"   # weaker evidence
 $L waive  C5 --reason "Needs production credentials; user to verify"
 
+# ... any further edit makes the evidence above STALE (git work tree is watched) ...
+$L reverify                 # re-run every recorded check after your LAST edit
 $L gate                     # exit 0 only if all claims VERIFIED (or waived)
 $L report --format md       # paste-ready evidence table for the final answer
 ```
@@ -162,12 +164,48 @@ Key behaviours:
   pipelines), with a timeout (`--timeout`, default 600 s).
 - Pass/fail is decided by `--expect-exit` (default 0) plus optional
   `--expect-stdout-contains`, `--expect-stdout-regex`, `--expect-stdout-not-contains`.
-- `--watch PATH` fingerprints files/directories at verification time. `gate` and
-  `status` recompute them; any change marks that evidence **STALE**, which fails the gate.
+- **Staleness is automatic inside a git work tree**: every check fingerprints the
+  work tree (HEAD + content of changed/untracked files, ignoring `.gitignore`d
+  files, tool caches and the ledger). Any later edit marks the evidence **STALE**,
+  which closes the gate. Outside git, or to be more precise, add `--watch PATH`
+  (repeatable); opt out with `--no-git-watch`.
+- `reverify` re-runs the last recorded check of every claim (or `--only-stale`),
+  which is the one-command way to satisfy "verify after the final edit".
+- **Vacuous checks are rejected**: `true`, `echo ...`, `exit 0`, `... || true`,
+  `; true`, `set +e`, `--collect-only`/`--dry-run` cannot count as evidence. The
+  guard is heuristic — it stops the common tricks, not every weak check, so the
+  "strongest affordable check" rule still applies.
+- Timeouts kill the **whole process tree**, and background processes a check
+  leaves behind are cleaned up.
 - `--label before` records a red-before-green baseline without counting it as the final proof.
 - `gate --allow-attested` lets `ATTESTED` claims pass when inspection is the best
   possible check; the report still labels them `ATTESTED`.
 - Exit codes: `0` ok/gate open · `1` gate closed or check failed · `2` usage error.
+
+## Enforcement: make the gate automatic
+
+A protocol the agent can forget is a suggestion. `scripts/stop_hook.py` turns it
+into a guard-rail:
+
+- **Claude Code** — register it as a `Stop` (and optionally `SubagentStop`) hook.
+  When a ledger exists and its gate is closed, the hook blocks the agent's first
+  attempt to finish and tells it exactly which claims are open; the agent must
+  prove them, waive them with a reason, or tell the user the task is partial. It
+  blocks at most once per stop (`stop_hook_active`), so it can never loop, and it
+  does nothing in projects without a ledger.
+
+  ```json
+  {
+    "hooks": {
+      "Stop": [{ "hooks": [{ "type": "command",
+        "command": "python3 \"$CLAUDE_PROJECT_DIR\"/.claude/skills/evidence-gate/scripts/stop_hook.py" }] }]
+    }
+  }
+  ```
+
+- **Anything else** (git `pre-push`, CI, other agent frameworks):
+  `python3 scripts/stop_hook.py --mode exit-code [--require-ledger]` prints the
+  gate and exits 1 when it is closed.
 
 If Python is unavailable, follow the protocol by hand: keep the claim list in your
 working notes and paste the evidence table from `references/report-template.md`.
@@ -207,8 +245,10 @@ The short list:
 |---|---|
 | `SKILL.md` | This protocol (the only file an agent strictly needs) |
 | `scripts/ledger.py` | Stdlib-only evidence ledger and completion gate |
+| `scripts/stop_hook.py` | Enforcement hook (Claude Code `Stop` hook, or exit-code mode for git/CI) |
 | `references/verification-recipes.md` | Strongest affordable check per task type |
 | `references/failure-modes.md` | Catalogue of false-success patterns and how to catch them |
 | `references/report-template.md` | Final report format with evidence table |
 | `LICENSE` | MIT license |
-| `tests/test_ledger.py` | Self-tests for the helper (`python3 -m unittest discover -s tests`) |
+| `tests/test_ledger.py` | Self-tests for the scripts (`python3 -m unittest discover -s tests`) |
+| `evals/` | A/B benchmark: scenarios with hidden checks that grade correctness *and* report honesty |
