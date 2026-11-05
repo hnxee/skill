@@ -443,6 +443,82 @@ class TestStopHook(LedgerTestCase):
         self.assertIn("GATE CLOSED", out)
 
 
+class TestFindingsFromEvals(LedgerTestCase):
+    """Regressions for usability gaps found by running real agents on evals/."""
+
+    def test_defer_keeps_claim_unverified_and_lists_user_action(self):
+        self.init("C1")
+        self.run_cli("attest", "C1", "--note", "wrong label")
+        self.run_cli("defer", "C1", "--reason", "needs prod access", "--user-check", "curl -fsS https://x/health")
+        self.assertEqual(self.states(), {"C1": "UNVERIFIED"})
+        self.assertEqual(self.run_cli("gate", "--allow-attested")[0], 1)
+        _, report, _ = self.run_cli("report")
+        self.assertIn("What you should do next", report)
+        self.assertIn("curl -fsS https://x/health", report)
+
+    def test_stderr_and_combined_output_assertions(self):
+        self.init("C1", "C2")
+        script = "import sys; print('boom', file=sys.stderr); sys.exit(1)"
+        self.assertEqual(self.run_cli("verify", "C1", "--label", "before", "--expect-exit", "1",
+                                      "--expect-stderr-contains", "boom", "--", PY, "-c", script)[0], 0)
+        self.assertEqual(self.run_cli("verify", "C2", "--expect-exit", "1",
+                                      "--expect-output-contains", "boom", "--", PY, "-c", script)[0], 0)
+
+    def test_latest_evidence_decides(self):
+        self.init("C1")
+        self.run_cli("verify", "C1", "--", PY, "-c", "import sys; sys.exit(1)")
+        self.run_cli("attest", "C1", "--note", "inspected after fixing")
+        self.assertEqual(self.states(), {"C1": "ATTESTED"})
+
+
+@unittest.skipUnless(HAS_GIT, "git not available")
+class TestGitFindings(TestGitWatch):
+    def test_stale_reason_names_the_changed_file(self):
+        self.init("C1")
+        self.run_cli("verify", "C1", "--", PY, "-c", "pass")
+        with open("REPORT.md", "w") as fh:
+            fh.write("done\n")
+        _, out, _ = self.run_cli("status")
+        self.assertIn("REPORT.md", out)
+
+    def test_ignore_pattern_unstales_non_deliverables(self):
+        self.init("C1")
+        self.run_cli("verify", "C1", "--", PY, "-c", "pass")
+        with open("REPORT.md", "w") as fh:
+            fh.write("done\n")
+        self.assertEqual(self.states(), {"C1": "STALE"})
+        self.run_cli("ignore", "REPORT.md")
+        self.assertEqual(self.states(), {"C1": "VERIFIED"})
+        with open("app.py", "a") as fh:  # real deliverables still invalidate evidence
+            fh.write("x = 9\n")
+        self.assertEqual(self.states(), {"C1": "STALE"})
+        _, report, _ = self.run_cli("report")
+        self.assertIn("Excluded from staleness checks: REPORT.md", report)
+
+    def test_ignore_also_applies_to_watched_directories(self):
+        self.init("C1")
+        self.run_cli("ignore", "REPORT.md")
+        self.run_cli("verify", "C1", "--watch", ".", "--", PY, "-c", "pass")
+        with open("REPORT.md", "w") as fh:
+            fh.write("done\n")
+        self.assertEqual(self.states(), {"C1": "VERIFIED"})
+
+    def test_changed_scope_check(self):
+        self.init()
+        with open("app.py", "a") as fh:
+            fh.write("x = 2\n")
+        os.makedirs("tests")
+        with open(os.path.join("tests", "test_app.py"), "w") as fh:
+            fh.write("pass\n")
+        code, out, _ = self.run_cli("changed", "--allow", "app.py", "--allow", "tests/*")
+        self.assertEqual(code, 0, out)
+        with open("other.py", "w") as fh:
+            fh.write("y = 1\n")
+        code, out, _ = self.run_cli("changed", "--allow", "app.py", "--allow", "tests/*")
+        self.assertEqual(code, 1)
+        self.assertIn("OUTSIDE  other.py", out)
+
+
 class TestDisplay(unittest.TestCase):
     def test_short_cmd_collapses_and_truncates(self):
         cmd = ["python3", "-c", "import x\n" + "y = 1\n" * 50]

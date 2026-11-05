@@ -63,9 +63,10 @@ fix as `UNVERIFIED` with the reasoning.
 
 ### Scope claim ("only touched X")
 ```bash
-ledger.py verify C9 --shell --expect-exit 1 -- "git diff --name-only HEAD | grep -vE '^(src/feature/|tests/)'"
+ledger.py verify C9 -- python3 path/to/ledger.py changed --allow 'src/feature/*' --allow 'tests/*'
 ```
-(`grep -v` exits 1 when nothing outside the allowed paths changed.)
+`changed` includes untracked files, ignores tool caches and the ledger, and exits 1
+if anything outside the allowed globs changed.
 
 ## Making checks trustworthy
 
@@ -83,6 +84,8 @@ ledger.py verify C9 --shell --expect-exit 1 -- "git diff --name-only HEAD | grep
 
 ## When no safe check exists
 
-Write the claim as `UNVERIFIED` (or `waive` it), and give the user the exact command
-or steps to verify it themselves. That is a complete, honest answer; a guessed
+Record it with `ledger.py defer ID --reason "..." --user-check "<exact command>"`:
+the claim stays `UNVERIFIED`, the outcome is *partial*, and the report tells the
+user exactly how to verify it. `waive` is only for claims the user agreed to skip.
+That is a complete, honest answer; a guessed
 "it works" is not.

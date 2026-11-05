@@ -40,13 +40,18 @@ evidence-gate/
 ├── README.md                         # this file
 ├── LICENSE                           # MIT
 ├── scripts/
-│   └── ledger.py                     # evidence ledger & completion gate (stdlib only)
+│   ├── ledger.py                     # evidence ledger & completion gate (stdlib only)
+│   └── stop_hook.py                  # enforcement: Claude Code Stop hook / git & CI gate
 ├── references/
 │   ├── verification-recipes.md       # strongest affordable check per task type
 │   ├── failure-modes.md              # catalogue of false-success patterns
 │   └── report-template.md            # final report format
+├── evals/
+│   ├── harness.py                    # set up + grade A/B runs (hidden checks)
+│   ├── README.md                     # method, results, limitations
+│   └── scenarios/                    # leap-year, multi-req-cli, unverifiable-prod
 └── tests/
-    └── test_ledger.py                # self-tests for ledger.py
+    └── test_ledger.py                # self-tests for the scripts
 ```
 
 ## Install
@@ -59,7 +64,24 @@ Copy the `evidence-gate/` folder into your agent's skills directory, for example
 | Claude Code (user) | `~/.claude/skills/evidence-gate/` |
 | Other agents | wherever the agent loads skills from, or paste `SKILL.md` into its instructions |
 
-No dependencies. Python 3.8+ is needed only for the optional script.
+No dependencies. Python 3.8+ is needed only for the optional scripts
+(tested on 3.11–3.13; the code is checked against the 3.8 grammar).
+
+### Make it enforced (recommended)
+
+Add to `.claude/settings.json` so the agent cannot finish while the gate is closed
+(it blocks once per stop attempt, never loops, and is a no-op without a ledger):
+
+```json
+{
+  "hooks": {
+    "Stop": [{ "hooks": [{ "type": "command",
+      "command": "python3 \"$CLAUDE_PROJECT_DIR\"/.claude/skills/evidence-gate/scripts/stop_hook.py" }] }]
+  }
+}
+```
+
+For git hooks, CI or other frameworks: `python3 scripts/stop_hook.py --mode exit-code`.
 
 ## Quick start (helper script)
 
@@ -69,15 +91,24 @@ $L init --task "Add --json flag to the export command"
 $L claim C1 "export --json prints valid JSON"
 $L claim C2 "Existing tests still pass"
 
-$L verify C1 --watch src -- sh -c 'mytool export --json | python3 -m json.tool >/dev/null'
-$L verify C2 --watch src --watch tests -- python3 -m pytest -q
-
+$L verify C1 --shell -- "mytool export --json | python3 -m json.tool >/dev/null"
+$L verify C2 -- python3 -m pytest -q
+# ... later edits make the evidence STALE automatically (git work tree is watched) ...
+$L reverify
 $L gate && $L report --format md
 ```
 
 The ledger lives in `.evidence/ledger.json` by default (override with `--ledger` or
 `$EVIDENCE_LEDGER`). Add `.evidence/` to your `.gitignore` if you don't want to
 commit it.
+
+## Does it work?
+
+`evals/` contains an A/B harness with hidden checks. The first run (n=1 per cell)
+showed **no measurable difference** in correctness or honesty on its three
+scenarios, cost about +17% tokens and about 2× time, and surfaced four usability
+bugs that are now fixed. Read `evals/README.md` before trusting any claim about
+this skill, including this one.
 
 ## Run the self-tests
 

@@ -114,7 +114,10 @@ def main(argv=None) -> int:
     lines += [
         "Before finishing, do ONE of the following:",
         "  1. Prove the open claims (fix, then `ledger.py reverify`), or",
-        "  2. `ledger.py waive ID --reason ...` for claims that genuinely cannot be checked, or",
+        "  2. `ledger.py defer ID --reason ... --user-check ...` for claims that cannot be checked here,",
+        "     then tell the user the task is PARTIAL (or `waive` if the user agreed to skip it), or",
+        "  If a claim is STALE only because of a non-deliverable file (e.g. REPORT.md),",
+        "  run `ledger.py ignore <file>`; never ignore source, tests or config.",
         "  3. Tell the user plainly that the task is PARTIAL and list what is unproven.",
         "Do not describe the task as complete while any claim above is open.",
     ]
@@ -123,4 +126,9 @@ def main(argv=None) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except BrokenPipeError:  # output cut short (e.g. `| head`): fail closed, never report success
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, sys.stdout.fileno())
+        sys.exit(1)

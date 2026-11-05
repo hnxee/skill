@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as _dt
+import fnmatch
 import hashlib
 import json
 import os
@@ -42,7 +43,7 @@ import tempfile
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 
 LEDGER_SCHEMA = 1
 DEFAULT_LEDGER = os.path.join(".evidence", "ledger.json")
@@ -71,6 +72,8 @@ EXIT_USAGE = 2
 # Absolute path of the ledger in use; excluded from git work-tree fingerprints
 # so that saving the ledger never makes its own evidence stale.
 _ACTIVE_LEDGER: Optional[str] = None
+# Glob patterns (from the ledger's "ignore" list) excluded from git staleness checks.
+_ACTIVE_IGNORES: List[str] = []
 
 
 class LedgerError(Exception):
@@ -191,14 +194,22 @@ def git_root(cwd: str) -> Optional[str]:
     return os.path.abspath(out.decode().strip()) if out else None
 
 
-def git_fingerprint(root: str) -> str:
-    """Fingerprint of a git work tree: HEAD + content of every changed/untracked file.
+def _ignored(rel: str) -> bool:
+    if any(part in SKIP_DIRS for part in rel.split("/")):
+        return True
+    base = rel.rsplit("/", 1)[-1]
+    return any(fnmatch.fnmatch(rel, pat) or fnmatch.fnmatch(base, pat) for pat in _ACTIVE_IGNORES)
 
-    Ignored files (per .gitignore), tool caches (SKIP_DIRS) and the active
-    ledger are excluded, so routine test runs do not invalidate evidence.
+
+def git_files(root: str) -> Optional[Dict[str, str]]:
+    """Map of HEAD plus every changed/untracked file in a git work tree to a content digest.
+
+    Ignored files (per .gitignore), tool caches (SKIP_DIRS), the active ledger
+    and the ledger's own ignore patterns are excluded, so routine test runs do
+    not invalidate evidence. Returns None when git cannot be queried.
     """
     if not os.path.isdir(root):
-        return "MISSING"
+        return None
     head = _git(root, "rev-parse", "HEAD")
     pathspec = [".", ":(exclude).evidence"]
     if _ACTIVE_LEDGER:
@@ -207,30 +218,48 @@ def git_fingerprint(root: str) -> str:
             pathspec.append(":(exclude){}".format(rel.replace(os.sep, "/")))
     status = _git(root, "status", "--porcelain=v1", "-z", "--untracked-files=all", "--", *pathspec)
     if status is None:
-        return "GIT_ERROR"
-    h = hashlib.sha256((head or b"NO_HEAD").strip() + b"\n")
+        return None
+    files: Dict[str, str] = {"<HEAD>": (head or b"NO_HEAD").decode().strip()}
     entries = status.split(b"\0")
-    i, count = 0, 0
+    i = 0
     while i < len(entries):
         entry = entries[i]
         i += 1
         if len(entry) < 4:
             continue
-        code, rel = entry[:2], entry[3:].decode("utf-8", "surrogateescape")
-        if code[:1] in (b"R", b"C"):
+        code, rel = entry[:2].decode(), entry[3:].decode("utf-8", "surrogateescape")
+        if code[:1] in ("R", "C"):
             i += 1  # skip the rename/copy source path
-        if any(part in SKIP_DIRS for part in rel.split("/")):
+        if _ignored(rel):
             continue
         full = os.path.join(root, rel)
         try:
             digest = _sha256_file(full) if os.path.isfile(full) else "ABSENT"
         except OSError:
             digest = "UNREADABLE"
-        h.update(code + b" " + rel.encode("utf-8", "surrogateescape") + b"\0" + digest.encode() + b"\n")
-        count += 1
-        if count > MAX_WATCH_FILES:
-            return "TOO_MANY_CHANGES"
-    return "git:{}:{}".format(count, h.hexdigest())
+        files[rel] = code + ":" + digest
+        if len(files) > MAX_WATCH_FILES:
+            raise LedgerError("more than {} changed files in {}; pass --no-git-watch and --watch "
+                              "narrower paths".format(MAX_WATCH_FILES, root))
+    return files
+
+
+def changed_files(root: str) -> List[str]:
+    """Paths that differ from HEAD (tracked changes + untracked), minus ignores."""
+    files = git_files(root)
+    if files is None:
+        raise LedgerError("{!r} is not a git work tree (or git is unavailable)".format(root))
+    return sorted(k for k in files if k != "<HEAD>")
+
+
+def git_fingerprint(root: str) -> str:
+    files = git_files(root)
+    if files is None:
+        return "MISSING" if not os.path.isdir(root) else "GIT_ERROR"
+    h = hashlib.sha256()
+    for rel in sorted(files):
+        h.update(rel.encode("utf-8", "surrogateescape") + b"\0" + files[rel].encode() + b"\n")
+    return "git:{}:{}".format(len(files) - 1, h.hexdigest())
 
 
 def fingerprint(path: str) -> str:
@@ -249,6 +278,8 @@ def fingerprint(path: str) -> str:
                 if _ACTIVE_LEDGER and os.path.abspath(full) == _ACTIVE_LEDGER:
                     continue
                 rel = os.path.relpath(full, path).replace(os.sep, "/")
+                if _ACTIVE_IGNORES and _ignored(rel):
+                    continue
                 try:
                     digest = _sha256_file(full)
                 except OSError:
@@ -275,6 +306,17 @@ def snapshot(keys: List[str]) -> Dict[str, str]:
     return {k: fingerprint(k) for k in keys}
 
 
+def git_snapshot(keys: List[str]) -> Dict[str, Dict[str, str]]:
+    """Per-file maps for git keys, so staleness can name the files that changed."""
+    out = {}
+    for k in keys:
+        if k.startswith(GIT_KEY):
+            files = git_files(k[len(GIT_KEY):])
+            if files is not None:
+                out[k] = files
+    return out
+
+
 def display_key(key: str) -> str:
     if key.startswith(GIT_KEY):
         return "git work tree"
@@ -285,8 +327,21 @@ def display_key(key: str) -> str:
     return key if rel.startswith("..") else rel
 
 
-def changed_watches(watch: Dict[str, str]) -> List[str]:
-    return [display_key(k) for k, fp in sorted(watch.items()) if fingerprint(k) != fp]
+def changed_watches(watch: Dict[str, str], git_maps: Optional[Dict[str, Dict[str, str]]] = None) -> List[str]:
+    changed = []
+    for key, fp in sorted(watch.items()):
+        stored = (git_maps or {}).get(key)
+        if key.startswith(GIT_KEY) and stored is not None:
+            current = git_files(key[len(GIT_KEY):]) or {}
+            before = {k: v for k, v in stored.items() if k == "<HEAD>" or not _ignored(k)}
+            diff = sorted(k for k in set(before) | set(current) if before.get(k) != current.get(k))
+            if diff:
+                names = ["new commit" if k == "<HEAD>" else k for k in diff]
+                shown = ", ".join(names[:5]) + (" (+{} more)".format(len(names) - 5) if len(names) > 5 else "")
+                changed.append("git work tree: " + shown)
+        elif fingerprint(key) != fp:
+            changed.append(display_key(key))
+    return changed
 
 
 # --------------------------------------------------------------------------- #
@@ -305,6 +360,7 @@ def load(path: str) -> Dict[str, Any]:
     if data.get("schema") != LEDGER_SCHEMA:
         raise LedgerError("unsupported ledger schema {!r}".format(data.get("schema")))
     _ACTIVE_LEDGER = os.path.abspath(path)
+    _ACTIVE_IGNORES[:] = list(data.get("ignore", []))
     return data
 
 
@@ -340,27 +396,24 @@ def final_evidence(claim: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 
 def evaluate(claim: Dict[str, Any]) -> Tuple[str, str]:
-    """Return (state, reason) for a claim."""
+    """Return (state, reason) for a claim. The most recent final evidence decides."""
     if claim.get("waived"):
         return WAIVED, claim["waived"].get("reason", "")
     final = final_evidence(claim)
-    runs = [e for e in final if e["kind"] == "run"]
-    attests = [e for e in final if e["kind"] == "attest"]
-    if runs:
-        ev = runs[-1]
-        if not ev["passed"]:
-            return FAILED, ev.get("failure", "check failed")
-        changed = changed_watches(ev.get("watch", {}))
-        if changed:
-            return STALE, "changed since check: " + ", ".join(changed)
-        return VERIFIED, "exit {} at {}".format(ev["exit_code"], ev["timestamp"])
-    if attests:
-        ev = attests[-1]
-        changed = changed_watches(ev.get("watch", {}))
-        if changed:
-            return STALE, "changed since attestation: " + ", ".join(changed)
+    if not final:
+        return UNVERIFIED, "no evidence recorded"
+    ev = final[-1]
+    if ev["kind"] == "defer":
+        return UNVERIFIED, "deferred: " + ev.get("reason", "")
+    if ev["kind"] == "run" and not ev["passed"]:
+        return FAILED, ev.get("failure", "check failed")
+    changed = changed_watches(ev.get("watch", {}), ev.get("git_files"))
+    if changed:
+        return STALE, "changed since {}: {}".format(
+            "check" if ev["kind"] == "run" else "attestation", "; ".join(changed))
+    if ev["kind"] == "attest":
         return ATTESTED, ev.get("note", "")
-    return UNVERIFIED, "no evidence recorded"
+    return VERIFIED, "exit {} at {}".format(ev["exit_code"], ev["timestamp"])
 
 
 def summarize(data: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -452,6 +505,11 @@ def check_assertions(result: Dict[str, Any], spec: Dict[str, Any]) -> Tuple[bool
         assertions.append({"type": "stdout_contains", "value": redact(needle), "ok": needle in stdout})
     for needle in spec.get("expect_stdout_not_contains") or []:
         assertions.append({"type": "stdout_not_contains", "value": redact(needle), "ok": needle not in stdout})
+    for needle in spec.get("expect_stderr_contains") or []:
+        assertions.append({"type": "stderr_contains", "value": redact(needle), "ok": needle in result["stderr"]})
+    for needle in spec.get("expect_output_contains") or []:
+        assertions.append({"type": "output_contains", "value": redact(needle),
+                           "ok": needle in stdout or needle in result["stderr"]})
     for pattern in spec.get("expect_stdout_regex") or []:
         try:
             ok = re.search(pattern, stdout, re.M) is not None
@@ -491,7 +549,8 @@ def execute(data: Dict[str, Any], cid: str, spec: Dict[str, Any], label: str, no
         result = run_check(command, spec["shell"], spec["timeout"], cwd)
         passed, assertions, failure = check_assertions(result, spec)
     # Fingerprint AFTER the check ran, so artifacts it produced are part of the baseline.
-    watch = snapshot(watch_keys(spec.get("watch") or [], cwd, spec.get("git_watch", True)))
+    keys = watch_keys(spec.get("watch") or [], cwd, spec.get("git_watch", True))
+    watch = snapshot(keys)
     evidence = {
         "kind": "run",
         "label": label,
@@ -511,6 +570,7 @@ def execute(data: Dict[str, Any], cid: str, spec: Dict[str, Any], label: str, no
         "stdout_tail": tail(result["stdout"]),
         "stderr_tail": tail(result["stderr"]),
         "watch": watch,
+        "git_files": git_snapshot(keys),
         "note": note,
     }
     claim.setdefault("evidence", []).append(evidence)
@@ -579,6 +639,8 @@ def cmd_verify(args: argparse.Namespace) -> int:
         "expect_stdout_contains": args.expect_stdout_contains or [],
         "expect_stdout_not_contains": args.expect_stdout_not_contains or [],
         "expect_stdout_regex": args.expect_stdout_regex or [],
+        "expect_stderr_contains": args.expect_stderr_contains or [],
+        "expect_output_contains": args.expect_output_contains or [],
         "watch": args.watch or [],
         "git_watch": not args.no_git_watch,
     }
@@ -631,12 +693,60 @@ def cmd_attest(args: argparse.Namespace) -> int:
     keys = watch_keys(args.watch or [], os.getcwd(), not args.no_git_watch)
     claim.setdefault("evidence", []).append({
         "kind": "attest", "label": "final", "timestamp": now_iso(),
-        "note": redact(args.note), "watch": snapshot(keys),
+        "note": redact(args.note), "watch": snapshot(keys), "git_files": git_snapshot(keys),
     })
     claim.pop("waived", None)
     save(path, data)
     print("[ATTESTED] {} :: {}".format(args.id, args.note))
     return EXIT_OK
+
+
+def cmd_defer(args: argparse.Namespace) -> int:
+    """Record that a claim cannot be checked here; it stays UNVERIFIED and blocks the gate."""
+    path = ledger_path(args.ledger)
+    data = load(path)
+    claim = get_claim(data, args.id)
+    claim.setdefault("evidence", []).append({
+        "kind": "defer", "label": "final", "timestamp": now_iso(),
+        "reason": redact(args.reason), "user_check": redact(args.user_check or ""),
+    })
+    claim.pop("waived", None)
+    save(path, data)
+    print("[UNVERIFIED] {} :: {}".format(args.id, args.reason))
+    if args.user_check:
+        print("  user can verify with: " + args.user_check)
+    return EXIT_OK
+
+
+def cmd_ignore(args: argparse.Namespace) -> int:
+    """Exclude non-deliverable files (reports, notes) from git staleness checks."""
+    path = ledger_path(args.ledger)
+    data = load(path)
+    patterns = data.setdefault("ignore", [])
+    for pat in args.patterns:
+        if pat not in patterns:
+            patterns.append(pat)
+    save(path, data)
+    print("Ignored for staleness: " + (", ".join(patterns) or "(none)"))
+    return EXIT_OK
+
+
+def cmd_changed(args: argparse.Namespace) -> int:
+    """List files changed vs HEAD; with --allow, fail if any is outside the allowed globs."""
+    path = ledger_path(args.ledger)
+    if os.path.exists(path):
+        load(path)  # apply the ledger's ignore patterns and exclude the ledger itself
+    root = git_root(os.getcwd())
+    if not root:
+        raise LedgerError("not inside a git work tree")
+    files = changed_files(root)
+    outside = [f for f in files if args.allow and
+               not any(fnmatch.fnmatch(f, pat) for pat in args.allow)]
+    for f in files:
+        print(("OUTSIDE  " if f in outside else "         ") + f if args.allow else f)
+    if args.allow:
+        print("{} changed file(s), {} outside the allowed scope".format(len(files), len(outside)))
+    return EXIT_FAIL if outside else EXIT_OK
 
 
 def cmd_waive(args: argparse.Namespace) -> int:
@@ -743,6 +853,8 @@ def cmd_report(args: argparse.Namespace) -> int:
             if extra:
                 evidence += ", {} output assertion(s) {}".format(
                     len(extra), "passed" if all(a["ok"] for a in extra) else "FAILED")
+        elif ev and ev["kind"] == "defer":
+            evidence = "not checked here"
         elif ev:
             evidence = "inspection: " + ev.get("note", "")
         else:
@@ -761,6 +873,18 @@ def cmd_report(args: argparse.Namespace) -> int:
             details.append("- {}: red-before-green baseline `{}` exited {} before the change.".format(
                 r["id"], short_cmd(b["command"]), b["exit_code"]))
     lines += details
+    todo = []
+    for r in rows:
+        fin = final_evidence(data["claims"][r["id"]])
+        if r["state"] != UNVERIFIED or not fin or fin[-1]["kind"] != "defer":
+            continue
+        d = fin[-1]
+        todo.append("- {}: {}{}".format(r["id"], d.get("reason", ""),
+                                        "; verify with `{}`".format(d["user_check"]) if d.get("user_check") else ""))
+    if todo:
+        lines += ["", "**What you should do next**"] + todo
+    if data.get("ignore"):
+        lines += ["", "_Excluded from staleness checks: {}_".format(", ".join(data["ignore"]))]
     if not is_open:
         lines += ["", "> Gate closed: this task must be reported as partially complete."]
     print("\n".join(lines))
@@ -799,6 +923,9 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--expect-stdout-not-contains", action="append", metavar="TEXT")
     s.add_argument("--expect-stdout-regex", action="append", metavar="REGEX",
                    help="Python regex searched in stdout (multiline mode)")
+    s.add_argument("--expect-stderr-contains", action="append", metavar="TEXT")
+    s.add_argument("--expect-output-contains", action="append", metavar="TEXT",
+                   help="TEXT must appear in stdout or stderr")
     s.add_argument("--watch", action="append", metavar="PATH",
                    help="file/dir whose later modification makes this evidence STALE (repeatable)")
     s.add_argument("--no-git-watch", action="store_true",
@@ -824,6 +951,21 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--no-git-watch", action="store_true")
     s.set_defaults(func=cmd_attest)
 
+    s = sub.add_parser("defer", help="mark a claim as impossible to check here (stays UNVERIFIED)")
+    s.add_argument("id")
+    s.add_argument("--reason", required=True, help="why it cannot be checked in this environment")
+    s.add_argument("--user-check", help="exact command/steps the user can run to verify it")
+    s.set_defaults(func=cmd_defer)
+
+    s = sub.add_parser("ignore", help="exclude non-deliverable files (e.g. REPORT.md) from staleness")
+    s.add_argument("patterns", nargs="+", metavar="GLOB")
+    s.set_defaults(func=cmd_ignore)
+
+    s = sub.add_parser("changed", help="list files changed vs HEAD; --allow GLOB makes it a scope check")
+    s.add_argument("--allow", action="append", metavar="GLOB",
+                   help="allowed path glob (repeatable); exit 1 if anything else changed")
+    s.set_defaults(func=cmd_changed)
+
     s = sub.add_parser("waive", help="explicitly exclude a claim, with a reason the user will see")
     s.add_argument("id")
     s.add_argument("--reason", required=True)
@@ -848,6 +990,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Optional[List[str]] = None) -> int:
     global _ACTIVE_LEDGER
     _ACTIVE_LEDGER = None
+    _ACTIVE_IGNORES[:] = []
     parser = build_parser()
     argv = list(sys.argv[1:] if argv is None else argv)
     # Everything after the first `--` is the command to verify, verbatim.
@@ -868,4 +1011,9 @@ def main(argv: Optional[List[str]] = None) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except BrokenPipeError:  # output cut short (e.g. `| head`): fail closed, never report success
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, sys.stdout.fileno())
+        sys.exit(1)

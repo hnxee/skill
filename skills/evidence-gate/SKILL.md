@@ -13,7 +13,7 @@ description: >-
   Not for pure conversation, brainstorming or questions that change nothing.
 license: MIT
 metadata:
-  version: 1.1.0
+  version: 1.2.0
   category: reliability
   requires: python>=3.8 (standard library only), optional
   portable: true
@@ -148,27 +148,41 @@ $L verify C1 --expect-exit 1 --label before -- python3 -c "from dates import par
 
 $L verify C1 -- python3 -m pytest tests/test_parse.py -q -k impossible
 $L verify C2 -- python3 -m pytest -q
-$L verify C3 --shell --expect-exit 1 -- "git diff --name-only HEAD | grep -vE '^(src/dates/|tests/)'"
+$L verify C3 -- $L changed --allow 'src/dates/*' --allow 'tests/*'   # scope check
 $L attest C4 --note "Read README section 'Dates'; wording updated"   # weaker evidence
-$L waive  C5 --reason "Needs production credentials; user to verify"
+$L defer  C5 --reason "Needs production credentials" \
+             --user-check "curl -fsS https://api.example.com/dates?d=2024-02-30"  # stays UNVERIFIED
+$L ignore REPORT.md         # non-deliverables you write later must not stale the evidence
 
 # ... any further edit makes the evidence above STALE (git work tree is watched) ...
 $L reverify                 # re-run every recorded check after your LAST edit
-$L gate                     # exit 0 only if all claims VERIFIED (or waived)
-$L report --format md       # paste-ready evidence table for the final answer
+$L gate                     # exit 0 only if all claims VERIFIED (or waived) -> here: closed by C5
+$L report --format md       # outcome PARTIAL + "What you should do next" for C5
 ```
+
+`defer` vs `waive`: use **`defer`** when a claim matters but cannot be checked in
+this environment — it stays `UNVERIFIED`, the gate stays closed, and the report
+tells the user exactly how to check it; the honest outcome is *partial*. Use
+**`waive`** only when the user agreed the claim is out of scope.
 
 Key behaviours:
 
 - `verify` runs the command **without a shell** by default (pass `--shell` for
   pipelines), with a timeout (`--timeout`, default 600 s).
 - Pass/fail is decided by `--expect-exit` (default 0) plus optional
-  `--expect-stdout-contains`, `--expect-stdout-regex`, `--expect-stdout-not-contains`.
+  `--expect-stdout-contains`, `--expect-stdout-regex`, `--expect-stdout-not-contains`,
+  `--expect-stderr-contains`, `--expect-output-contains` (stdout or stderr).
+- The most recent evidence for a claim decides its state (a `defer` after an
+  `attest` makes it `UNVERIFIED` again; a new passing run after a failure makes it `VERIFIED`).
 - **Staleness is automatic inside a git work tree**: every check fingerprints the
   work tree (HEAD + content of changed/untracked files, ignoring `.gitignore`d
   files, tool caches and the ledger). Any later edit marks the evidence **STALE**,
-  which closes the gate. Outside git, or to be more precise, add `--watch PATH`
-  (repeatable); opt out with `--no-git-watch`.
+  which closes the gate, and the reason names the files that changed. Outside
+  git, or to be more precise, add `--watch PATH` (repeatable); opt out with
+  `--no-git-watch`. `ignore GLOB` excludes non-deliverables such as your own
+  report file — never source, tests or config; ignored patterns are listed in the report.
+- `changed [--allow GLOB ...]` lists files changed vs HEAD (caches and the ledger
+  excluded) and, with `--allow`, exits 1 if anything outside the scope changed.
 - `reverify` re-runs the last recorded check of every claim (or `--only-stale`),
   which is the one-command way to satisfy "verify after the final edit".
 - **Vacuous checks are rejected**: `true`, `echo ...`, `exit 0`, `... || true`,
@@ -251,4 +265,4 @@ The short list:
 | `references/report-template.md` | Final report format with evidence table |
 | `LICENSE` | MIT license |
 | `tests/test_ledger.py` | Self-tests for the scripts (`python3 -m unittest discover -s tests`) |
-| `evals/` | A/B benchmark: scenarios with hidden checks that grade correctness *and* report honesty |
+| `evals/` | A/B benchmark with hidden checks grading correctness *and* report honesty; results and limits in `evals/README.md` |
