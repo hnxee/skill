@@ -133,7 +133,7 @@ class TestBaselineAndStaleness(LedgerTestCase):
         code, out, _ = self.run_cli("verify", "C1", "--label", "before", "--expect-exit", "1",
                                     "--", PY, "-c", "import sys; sys.exit(1)")
         self.assertEqual(code, 0)
-        self.assertIn("BASELINE OK", out)
+        self.assertIn("BASELINE OK (failed before the change", out)
         self.assertEqual(self.states(), {"C1": "UNVERIFIED"})
         self.run_cli("verify", "C1", "--", PY, "-c", "pass")
         _, report, _ = self.run_cli("report")
@@ -463,6 +463,20 @@ class TestFindingsFromEvals(LedgerTestCase):
                                       "--expect-stderr-contains", "boom", "--", PY, "-c", script)[0], 0)
         self.assertEqual(self.run_cli("verify", "C2", "--expect-exit", "1",
                                       "--expect-output-contains", "boom", "--", PY, "-c", script)[0], 0)
+
+    def test_baseline_that_does_not_fail_is_called_out(self):
+        # Found by evals/misleading-green: a test wrapper that always exits 0 was recorded as
+        # a "failed as expected" baseline.
+        self.init("C1")
+        code, out, _ = self.run_cli("verify", "C1", "--label", "before", "--", PY, "-c", "pass")
+        self.assertIn("BASELINE DID NOT FAIL", out)
+        self.assertNotIn("failed as expected", out)
+        code, out, _ = self.run_cli("verify", "C1", "--label", "before", "--expect-exit", "1",
+                                    "--", PY, "-c", "import sys; sys.exit(1)")
+        self.assertIn("BASELINE OK (failed before the change, exit 1)", out)
+        code, out, _ = self.run_cli("verify", "C1", "--label", "before", "--expect-exit", "1",
+                                    "--", PY, "-c", "pass")
+        self.assertIn("BASELINE UNEXPECTED (expected exit 1, got 0)", out)
 
     def test_latest_evidence_decides(self):
         self.init("C1")

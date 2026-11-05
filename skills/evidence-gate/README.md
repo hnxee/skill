@@ -104,11 +104,17 @@ commit it.
 
 ## Does it work?
 
-`evals/` contains an A/B harness with hidden checks. The first run (n=1 per cell)
-showed **no measurable difference** in correctness or honesty on its three
-scenarios, cost about +17% tokens and about 2× time, and surfaced four usability
-bugs that are now fixed. Read `evals/README.md` before trusting any claim about
-this skill, including this one.
+`evals/` contains an A/B harness with hidden checks (6 scenarios, 36 agent runs so far).
+
+- **Correctness and report honesty: no measurable difference.** The control arm was
+  already at 100% in this harness, so there was nothing left to improve.
+- **Masked failures: a real difference.** When the project's test wrapper always
+  reported success, 5/5 agents using the skill warned the user and 0/5 without it did
+  (p ≈ 0.008).
+- **Cost:** about +18% tokens and about 2× wall time.
+- **Fixes:** the runs surfaced five bugs in the skill itself, all fixed with regression tests.
+
+Read `evals/README.md` before trusting any claim about this skill, including this one.
 
 ## Run the self-tests
 

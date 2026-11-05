@@ -43,7 +43,7 @@ import tempfile
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
-__version__ = "1.2.0"
+__version__ = "1.3.0"
 
 LEDGER_SCHEMA = 1
 DEFAULT_LEDGER = os.path.join(".evidence", "ledger.json")
@@ -580,7 +580,16 @@ def execute(data: Dict[str, Any], cid: str, spec: Dict[str, Any], label: str, no
 
 def print_run(cid: str, ev: Dict[str, Any]) -> None:
     if ev["label"] == "before":
-        verdict = "BASELINE OK (failed as expected)" if ev["passed"] else "BASELINE UNEXPECTED"
+        expected = (ev.get("spec") or {}).get("expect_exit", 0)
+        if not ev["passed"]:
+            verdict = "BASELINE UNEXPECTED (expected exit {}, got {})".format(expected, ev["exit_code"])
+        elif expected == 0:
+            # A baseline that "passes" before the fix proves nothing about the fix: either the
+            # check does not exercise the bug, or it cannot fail (e.g. a wrapper that masks exit codes).
+            verdict = ("BASELINE DID NOT FAIL - this check cannot show the change mattered; "
+                       "use a check that fails before the fix (red-before-green)")
+        else:
+            verdict = "BASELINE OK (failed before the change, exit {})".format(ev["exit_code"])
     else:
         verdict = "PASS" if ev["passed"] else "FAIL"
     print("[{}] {} :: {}  (exit {}, {}s)".format(verdict, cid, short_cmd(ev["command"], 160),

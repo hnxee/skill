@@ -24,6 +24,7 @@ happen in this session?*
 | 16 | **Success by exit code only** | Program printed `ERROR` but exited 0 | Add `--expect-stdout-not-contains ERROR` or a positive output assertion |
 | 17 | **Unverifiable claim presented as fact** | "This is now secure", "This scales" | Turn it into specific, testable sub-claims or label it as opinion |
 | 18 | **Verification with side effects** | Ran the migration on prod "to check" | Checks are read-only or sandboxed; risky checks are the user's call |
+| 19 | **Wrapper masks the result** | `./run_tests.sh` / `make test` / a CI script exits 0 and prints "done" even when tests fail | Run the check *before* the fix: if it doesn't fail, it can't prove the fix (`verify --label before` reports `BASELINE DID NOT FAIL`). Assert on the real runner or its log, and tell the user the wrapper is broken |
 
 ## Language to avoid in a final report unless backed by `VERIFIED` evidence
 

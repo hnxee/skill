@@ -13,7 +13,7 @@ description: >-
   Not for pure conversation, brainstorming or questions that change nothing.
 license: MIT
 metadata:
-  version: 1.2.0
+  version: 1.3.0
   category: reliability
   requires: python>=3.8 (standard library only), optional
   portable: true
@@ -248,6 +248,8 @@ The short list:
 - Running a narrower check than the claim (one test file for "all tests pass").
 - Treating a non-zero exit as "probably flaky" without re-running and reporting it.
 - Piping into `head`/`tail`/`grep` so the exit code becomes the pipe's, not the program's.
+- Trusting a project's test wrapper (`run_tests.sh`, `make test`) without checking it
+  can fail: a red-before-green baseline that does not go red exposes it.
 - Editing a test's expectations to match buggy output.
 - Mocking the very thing the claim is about.
 - Reporting a summary number ("98% passing") without naming what failed.
